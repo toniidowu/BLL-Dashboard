@@ -1,0 +1,277 @@
+---
+title: "Georgia Blood Lead Levels Dashboard (2013-2022)"
+output:
+  flexdashboard::flex_dashboard:
+    orientation: columns
+    vertical_layout: scroll
+runtime: shiny
+resource_files:
+- data/2013.xlsx
+- data/2014.xlsx
+- data/2015.xlsx
+- data/2016.xlsx
+- data/2017.xlsx
+- data/2018.xlsx
+- data/2019.xlsx
+- data/2020.xlsx
+- data/2021.xlsx
+- data/2022.xlsx
+- data/2023.xlsx
+- data/2024.xlsx
+- data/2022.xlsx
+- data/2021.xlsx
+- data/2020.xlsx
+- data/2019.xlsx
+- data/2018.xlsx
+- data/2017.xlsx
+- data/2016.xlsx
+---
+
+```{r setup, include=FALSE}
+# ------------------------------
+# Step 1: Load Required Libraries
+# ------------------------------
+library(flexdashboard)
+library(shiny)
+library(sf)           # Spatial data
+library(leaflet)      # Interactive maps
+library(dplyr)        # Data manipulation
+library(readxl)       # Read Excel files
+library(janitor)      # Clean column names
+library(tidycensus)   # Get Census data
+library(stringr)      # String manipulation
+library(purrr)        # Functional programming
+library(tigris)       # Get shapefiles
+library(rsconnect)
+
+# Suppress warnings
+options(warn = -1)
+
+# ------------------------------
+# Step 2: Set Paths
+# ------------------------------
+excel_folder <- "data"
+
+# ------------------------------
+# Step 3: Define Function to Get Census Data
+# ------------------------------
+get_children_under6 <- function(year) {
+  get_acs(
+    geography = "county",
+    state = "GA",
+    variables = c(
+      male_under5 = "B01001_003",
+      male_5years = "B01001_004",
+      female_under5 = "B01001_027",
+      female_5years = "B01001_028"
+    ),
+    year = year,
+    survey = "acs5",
+    output = "wide"
+  ) %>%
+    mutate(
+      total_under6 = male_under5E + male_5yearsE + female_under5E + female_5yearsE,
+      year = year,
+      county_name = toupper(str_remove(NAME, " County, Georgia"))
+    ) %>%
+    select(GEOID, county_name, total_under6, year)
+}
+
+# ------------------------------
+# Step 4: Pull Census Data for Years 2013-2022 Only
+# ------------------------------
+census_data <- map_df(2013:2022, possibly(get_children_under6, otherwise = NULL))
+
+# ------------------------------
+# Step 5: Load Georgia County Shapefiles
+# ------------------------------
+ga_counties <- counties(state = "GA", cb = TRUE, year = 2022, class = "sf") %>%
+  mutate(NAME = toupper(trimws(NAME)))
+
+# ------------------------------
+# Step 6: Load All Excel Files (2013-2022 only)
+# ------------------------------
+excel_files <- list.files(
+  excel_folder,
+  pattern = "^[^~].*\\.xlsx$",
+  full.names = TRUE
+)
+
+# Filter to only include years 2013-2022
+excel_files <- excel_files[grepl("201[3-9]|202[0-2]", excel_files)]
+
+# ------------------------------
+# Step 7: Process Each Excel File
+# ------------------------------
+process_excel_file <- function(file) {
+  year <- as.numeric(tools::file_path_sans_ext(basename(file)))
+  
+  if(year < 2013 || year > 2022) return(NULL)
+  
+  threshold <- ifelse(year >= 2021, 3.5, 5)
+  
+  data <- read_excel(file, sheet = "Data") %>%
+    select(1:4) %>%
+    clean_names() %>%
+    mutate(
+      county = toupper(trimws(county)),
+      county = gsub(" COUNTY$", "", county),
+      year = year,
+      threshold = threshold
+    )
+  
+  if("perc_children_5" %in% names(data)) {
+    data <- data %>% rename(perc_screened_elevated = perc_children_5)
+  } else if("perc_children_3_5" %in% names(data)) {
+    data <- data %>% rename(perc_screened_elevated = perc_children_3_5)
+  }
+  
+  data <- data %>%
+    select(county, year, threshold, total_children_screened, perc_screened_elevated)
+  
+  return(data)
+}
+
+all_screening_data <- map_df(excel_files, process_excel_file)
+
+# Safety check before filtering
+if(nrow(all_screening_data) > 0 && "county" %in% names(all_screening_data)) {
+  all_screening_data <- all_screening_data %>% filter(!is.na(county))
+}
+  
+
+# ------------------------------
+# Step 8: Merge Census Data with Screening Data & Calculate Metrics
+# ------------------------------
+final_data <- all_screening_data %>%
+  left_join(census_data, by = c("county" = "county_name", "year" = "year")) %>%
+  mutate(
+    perc_screened_elevated = as.numeric(perc_screened_elevated),
+    num_elevated_BLL = total_children_screened * perc_screened_elevated,
+    screening_rate = (total_children_screened / total_under6) * 100,
+    prevalence = perc_screened_elevated * 100   # % of screened children elevated
+  )
+```
+
+Sidebar {.sidebar}
+-----------------------------------------------------------------------
+```{r}
+selectInput("selected_year",
+            label = "Choose Year:",
+            choices = 2013:2022,
+            selected = 2022)
+
+selectInput("selected_metric",
+            label = "Choose Metric:",
+            choices = c("Prevalence", "Screening Rate"),
+            selected = "Prevalence")
+```
+
+---
+
+**Dashboard Information:**
+
+This dashboard displays blood lead level data for Georgia counties from 2013-2022.
+
+**Metrics Shown:**
+
+- **Screening Rate:** % of population under 6 who were tested.
+
+- **Prevalence:** % of children under 6 screened with elevated blood lead levels.
+
+**BLL Thresholds:**
+
+* 2013-2020: ≥5 µg/dL
+* 2021-2022: ≥3.5 µg/dL
+
+Column
+-----------------------------------------------------------------------
+
+### County Map
+```{r}
+output$county_map <- renderLeaflet({
+  
+  year_selected <- as.numeric(input$selected_year)
+  metric_selected <- input$selected_metric
+  
+  req(year_selected, metric_selected, final_data, ga_counties)
+  
+  year_data <- final_data %>%
+    filter(year == year_selected)
+  
+  req(nrow(year_data) > 0)
+  
+  map_data <- ga_counties %>%
+    left_join(year_data, by = c("NAME" = "county"))
+  
+  # ------------------------------
+  # Select metric dynamically
+  # ------------------------------
+  if(metric_selected == "Prevalence") {
+    map_values <- map_data$prevalence
+    legend_title <- "Prevalence (%)"
+    domain_min <- 0
+    domain_max <- 35
+  } else {
+    map_values <- map_data$screening_rate
+    legend_title <- "Screening Rate (%)"
+    domain_min <- 0
+    domain_max <- 30
+  }
+  
+  # Color palette
+  pal <- colorNumeric(
+    palette = c("#E6D5F5", "#C9A5E8", "#9D5BD2", "#7B2CBF", "#5A189A", "#3C096C"),
+    domain = c(domain_min, domain_max),
+    na.color = "lightgrey"
+  )
+  
+  # Hover labels (no race, no true prevalence)
+  labels <- sprintf(
+    "<strong>%s County</strong><br/>
+    Population Under 6: %s<br/>
+    Total Tested: %s<br/>
+    Screening Rate: %s%%<br/>
+    Children with Elevated BLL: %s<br/>
+    Prevalence: %s%%",
+    map_data$NAME,
+    ifelse(is.na(map_data$total_under6), "N/A", format(map_data$total_under6, big.mark = ",")),
+    ifelse(is.na(map_data$total_children_screened), "N/A", format(map_data$total_children_screened, big.mark = ",")),
+    ifelse(is.na(map_data$screening_rate), "N/A", round(map_data$screening_rate, 2)),
+    ifelse(is.na(map_data$num_elevated_BLL), "N/A", round(map_data$num_elevated_BLL, 0)),
+    ifelse(is.na(map_data$prevalence), "N/A", round(map_data$prevalence, 2))
+  ) %>% lapply(htmltools::HTML)
+  
+  # Render Leaflet
+  leaflet(map_data) %>%
+    addProviderTiles(providers$CartoDB.Positron) %>%
+    addPolygons(
+      fillColor = ~pal(map_values),
+      weight = 1,
+      opacity = 1,
+      color = "white",
+      fillOpacity = 0.7,
+      highlightOptions = highlightOptions(
+        weight = 3, color = "#666",
+        fillOpacity = 0.9,
+        bringToFront = TRUE
+      ),
+      label = labels,
+      labelOptions = labelOptions(
+        style = list("font-weight" = "normal", padding = "3px 8px"),
+        textsize = "13px",
+        direction = "auto"
+      )
+    ) %>%
+    addLegend(
+      pal = pal,
+      values = c(domain_min, domain_max),
+      opacity = 0.7,
+      title = legend_title,
+      position = "bottomright", 
+      labFormat = labelFormat(suffix = "%") 
+    )
+})
+
+leafletOutput("county_map", height = "800px")
+```
