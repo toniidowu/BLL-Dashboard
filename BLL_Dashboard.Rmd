@@ -6,6 +6,7 @@ output:
     vertical_layout: scroll
 runtime: shiny
 resource_files:
+- data/census_data.rds
 - data/2013.xlsx
 - data/2014.xlsx
 - data/2015.xlsx
@@ -44,6 +45,7 @@ library(purrr)        # Functional programming
 library(tigris)       # Get shapefiles
 library(rsconnect)
 
+
 # Suppress warnings
 options(warn = -1)
 
@@ -53,43 +55,18 @@ options(warn = -1)
 excel_folder <- "data"
 
 # ------------------------------
-# Step 3: Define Function to Get Census Data
+# Step 3: Load Census Data for Years 2013-2022 Only
 # ------------------------------
-get_children_under6 <- function(year) {
-  get_acs(
-    geography = "county",
-    state = "GA",
-    variables = c(
-      male_under5 = "B01001_003",
-      male_5years = "B01001_004",
-      female_under5 = "B01001_027",
-      female_5years = "B01001_028"
-    ),
-    year = year,
-    survey = "acs5",
-    output = "wide"
-  ) %>%
-    mutate(
-      total_under6 = male_under5E + male_5yearsE + female_under5E + female_5yearsE,
-      year = year,
-      county_name = toupper(str_remove(NAME, " County, Georgia"))
-    ) %>%
-    select(GEOID, county_name, total_under6, year)
-}
+census_data <- readRDS("data/census_data.rds")
 
 # ------------------------------
-# Step 4: Pull Census Data for Years 2013-2022 Only
-# ------------------------------
-census_data <- map_df(2013:2022, possibly(get_children_under6, otherwise = NULL))
-
-# ------------------------------
-# Step 5: Load Georgia County Shapefiles
+# Step 4: Load Georgia County Shapefiles
 # ------------------------------
 ga_counties <- counties(state = "GA", cb = TRUE, year = 2022, class = "sf") %>%
   mutate(NAME = toupper(trimws(NAME)))
 
 # ------------------------------
-# Step 6: Load All Excel Files (2013-2022 only)
+# Step 5: Load All Excel Files (2013-2022 only)
 # ------------------------------
 excel_files <- list.files(
   excel_folder,
@@ -101,7 +78,7 @@ excel_files <- list.files(
 excel_files <- excel_files[grepl("201[3-9]|202[0-2]", excel_files)]
 
 # ------------------------------
-# Step 7: Process Each Excel File
+# Step 6: Process Each Excel File
 # ------------------------------
 process_excel_file <- function(file) {
   year <- as.numeric(tools::file_path_sans_ext(basename(file)))
@@ -141,7 +118,7 @@ if(nrow(all_screening_data) > 0 && "county" %in% names(all_screening_data)) {
   
 
 # ------------------------------
-# Step 8: Merge Census Data with Screening Data & Calculate Metrics
+# Step 7: Merge Census Data with Screening Data & Calculate Metrics
 # ------------------------------
 final_data <- all_screening_data %>%
   left_join(census_data, by = c("county" = "county_name", "year" = "year")) %>%
