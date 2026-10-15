@@ -221,7 +221,10 @@ output$county_map <- renderLeaflet({
   
   # Render Leaflet
   leaflet(map_data) %>%
-    addProviderTiles(providers$CartoDB.Positron) %>%
+    addTiles(
+  urlTemplate = "https://basemaps.cartocdn.com/rastertiles/light_all/{z}/{x}/{y}.png?key=cb1_4lwa_1_a98d95ec08bea765354adc10",
+  attribution = "&copy; OpenStreetMap, &copy; CARTO"
+) %>%
     addPolygons(
       fillColor = ~pal(map_values),
       weight = 1,
